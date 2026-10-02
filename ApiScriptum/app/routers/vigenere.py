@@ -727,8 +727,10 @@ async def descifrar_archivo_grande(
         texto_descifrado_completo = []
         bytes_procesados = CANARY_SIZE if not skip_canary else 0
 
-        # Si no skip_canary, agregar el canary descifrado al resultado
+        # Si no skip_canary, agregar el canary descifrado al resultado sin el magic header
         if not skip_canary:
+            if canary_descifrado.startswith(magic_header):
+                canary_descifrado = canary_descifrado[len(magic_header):]
             texto_descifrado_completo.append(canary_descifrado)
 
         # Si skipped canary, resetear la posición del archivo
