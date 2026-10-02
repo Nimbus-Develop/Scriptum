@@ -2,6 +2,8 @@ package es.luna.model;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.io.File;
+
 /**
  * Response DTO para operación de descifrado Vigenère.
  * Corresponde al schema DescifradoResponse de la API.
@@ -24,6 +26,9 @@ public class VigenereDescifradoResponse {
     /**
      * Constructor vacío.
      */
+    /** Archivo con el resultado cuando es demasiado grande para mantenerlo en memoria (no se serializa). */
+    private transient File archivoSalida;
+
     public VigenereDescifradoResponse() {
     }
 
@@ -63,5 +68,13 @@ public class VigenereDescifradoResponse {
      */
     public void setClaveUsada(String claveUsada) {
         this.claveUsada = claveUsada;
+    }
+
+    public File getArchivoSalida() {
+        return archivoSalida;
+    }
+
+    public void setArchivoSalida(File archivoSalida) {
+        this.archivoSalida = archivoSalida;
     }
 }

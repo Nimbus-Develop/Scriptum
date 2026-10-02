@@ -186,8 +186,15 @@ public class VigenereService {
         boolean isLargeFile = fileSize >= LARGE_FILE_THRESHOLD;
 
         if (isLargeFile) {
-            logger.info("Archivo grande detectado ({} MB), usando endpoint /large con streaming",
+            logger.info("Archivo grande detectado ({} MB), usando endpoint /large con streaming a archivo",
                     fileSize / (1024.0 * 1024.0));
+
+            // Crear archivos de salida automáticamente
+            String nombreOriginal = archivo.getName();
+            int punto = nombreOriginal.lastIndexOf('.');
+            String nombreSinExtension = punto > 0 ? nombreOriginal.substring(0, punto) : nombreOriginal;
+            File archivoJsonTemp = new File(archivo.getParentFile(), nombreSinExtension + "_response.json");
+            File archivoTextoFinal = new File(archivo.getParentFile(), nombreSinExtension + "_cifrado.txt");
 
             // Crear form data con parámetros adicionales para el endpoint large
             Map<String, String> formData = new HashMap<>();
@@ -195,15 +202,28 @@ public class VigenereService {
             formData.put("magic_header", magicHeader);
             formData.put("add_header", String.valueOf(addHeader));
 
-            // Usar endpoint /large que devuelve una respuesta diferente
-            return apiClient.postMultipartAsync(
+            // Usar endpoint /large guardando respuesta JSON temporal
+            return apiClient.postMultipartStreamingToFileAsync(
                     BASE_ENDPOINT + "/cifrar/file/large",
                     archivo,
                     formData,
-                    VigenereCifradoLargeResponse.class
-            ).thenApply(largeResponse -> {
-                // Convertir VigenereCifradoLargeResponse a VigenereCifradoResponse
-                return createCifradoResponse(largeResponse.getTextoCifrado(), largeResponse.getClaveUsada());
+                    archivoJsonTemp
+            ).thenApply(jsonFile -> {
+                // Extraer texto cifrado a archivo separado sin cargar todo en memoria
+                try {
+                    String claveUsada = extraerCampoTextoAArchivo(jsonFile, "texto_cifrado", archivoTextoFinal);
+                    logger.info("Archivo grande cifrado exitosamente - Guardado en: {}", archivoTextoFinal.getAbsolutePath());
+
+                    // Crear respuesta indicando que se guardó en archivo
+                    VigenereCifradoResponse response = new VigenereCifradoResponse();
+                    response.setTextoCifrado("[ARCHIVO GRANDE - Guardado en: " + archivoTextoFinal.getAbsolutePath() + "]");
+                    response.setArchivoSalida(archivoTextoFinal);
+                    response.setClaveUsada(claveUsada);
+                    return response;
+                } catch (Exception e) {
+                    logger.error("Error al procesar archivo de respuesta: {}", e.getMessage());
+                    throw new RuntimeException("Error al procesar respuesta: " + e.getMessage(), e);
+                }
             }).whenComplete((response, error) -> {
                 if (error != null) {
                     logger.warn("Error al cifrar archivo grande con Vigenère: {}", error.getMessage());
@@ -304,17 +324,29 @@ public class VigenereService {
             formData.put("magic_header", magicHeader);
             formData.put("skip_canary", String.valueOf(skipCanary));
 
-            // Usar endpoint /large que devuelve una respuesta diferente
-            return apiClient.postMultipartAsync(
+            // Guardar la respuesta JSON directamente a disco para no cargar cientos de MB en el heap
+            String nombreOriginal = archivoCifrado.getName();
+            int punto = nombreOriginal.lastIndexOf('.');
+            String nombreSinExtension = punto > 0 ? nombreOriginal.substring(0, punto) : nombreOriginal;
+            File archivoJsonTemp = new File(archivoCifrado.getParentFile(), nombreSinExtension + "_response.json");
+            File archivoTextoFinal = new File(archivoCifrado.getParentFile(), nombreSinExtension + "_descifrado.txt");
+
+            return apiClient.postMultipartStreamingToFileAsync(
                     BASE_ENDPOINT + "/descifrar/file/large",
                     archivoCifrado,
                     formData,
-                    VigenereDescifradoLargeResponse.class
-            ).thenApply(largeResponse -> {
-                // Convertir VigenereDescifradoLargeResponse a VigenereDescifradoResponse
-                // Usar reflexión o crear un metodo setter en el modelo
-                // Por ahora, crear una instancia con los valores necesarios
-                return createDescifradoResponse(largeResponse.getTextoDescifrado(), largeResponse.getClaveUsada());
+                    archivoJsonTemp
+            ).thenApply(jsonFile -> {
+                try {
+                    String claveUsada = extraerCampoTextoAArchivo(jsonFile, "texto_descifrado", archivoTextoFinal);
+                    VigenereDescifradoResponse response = createDescifradoResponse(
+                            "[ARCHIVO GRANDE - Guardado en: " + archivoTextoFinal.getAbsolutePath() + "]", claveUsada);
+                    response.setArchivoSalida(archivoTextoFinal);
+                    return response;
+                } catch (Exception e) {
+                    logger.error("Error al procesar archivo de respuesta: {}", e.getMessage());
+                    throw new RuntimeException("Error al procesar respuesta: " + e.getMessage(), e);
+                }
             }).whenComplete((response, error) -> {
                 if (error != null) {
                     logger.warn("Error al descifrar archivo grande con Vigenère: {}", error.getMessage());
@@ -355,6 +387,114 @@ public class VigenereService {
         response.setTextoDescifrado(textoDescifrado);
         response.setClaveUsada(claveUsada);
         return response;
+    }
+
+    /**
+     * Extrae un campo de texto del JSON de respuesta y lo escribe en un archivo, carácter a carácter,
+     * sin cargar nunca el valor completo en memoria (el JSON puede venir en una sola línea de cientos de MB).
+     *
+     * El JSON tiene esta estructura: {"texto_cifrado": "TEXTO_GIGANTE...", "clave_usada": "CLAVE", ...}
+     *
+     * @param jsonFile archivo JSON que contiene la respuesta (será eliminado después)
+     * @param campoTexto nombre del campo cuyo valor se vuelca al archivo ("texto_cifrado" o "texto_descifrado")
+     * @param outputTextFile archivo donde guardar solo el texto
+     * @return el valor de clave_usada ("DESCONOCIDA" si no aparece)
+     */
+    private String extraerCampoTextoAArchivo(File jsonFile, String campoTexto, File outputTextFile) throws Exception {
+        String claveUsada = "DESCONOCIDA";
+
+        try (java.io.Reader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                     new java.io.FileInputStream(jsonFile), java.nio.charset.StandardCharsets.UTF_8), 65536);
+             java.io.Writer writer = new java.io.BufferedWriter(new java.io.OutputStreamWriter(
+                     new java.io.FileOutputStream(outputTextFile), java.nio.charset.StandardCharsets.UTF_8), 65536)) {
+
+            int depth = 0;
+            int c;
+            while ((c = reader.read()) != -1) {
+                if (c == '{' || c == '[') {
+                    depth++;
+                } else if (c == '}' || c == ']') {
+                    depth--;
+                } else if (c == '"' && depth == 1) {
+                    // Clave (o valor string) del objeto raíz
+                    String clave = leerStringJson(reader, null);
+                    c = saltarEspacios(reader);
+                    if (c != ':') {
+                        continue;
+                    }
+                    c = saltarEspacios(reader);
+                    if (c != '"') {
+                        // Valor no string (número, objeto...): lo procesa el bucle principal
+                        if (c == '{' || c == '[') {
+                            depth++;
+                        }
+                        continue;
+                    }
+                    if (campoTexto.equals(clave)) {
+                        leerStringJson(reader, writer);
+                        logger.info("Texto extraído a: {}", outputTextFile.getAbsolutePath());
+                    } else {
+                        String valor = leerStringJson(reader, null);
+                        if ("clave_usada".equals(clave)) {
+                            claveUsada = valor;
+                            logger.debug("Clave usada extraída: {}", claveUsada);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Eliminar archivo JSON temporal (ya no se necesita)
+        if (jsonFile.delete()) {
+            logger.debug("Archivo JSON temporal eliminado: {}", jsonFile.getName());
+        }
+
+        return claveUsada;
+    }
+
+    /** Avanza hasta el primer carácter que no sea espacio en blanco y lo devuelve (-1 si fin). */
+    private int saltarEspacios(java.io.Reader reader) throws java.io.IOException {
+        int c;
+        do {
+            c = reader.read();
+        } while (c != -1 && Character.isWhitespace(c));
+        return c;
+    }
+
+    /**
+     * Lee el contenido de un string JSON (la comilla de apertura ya está consumida) hasta la comilla
+     * de cierre, decodificando los escapes. Si {@code destino} no es null, escribe ahí los caracteres
+     * y devuelve null; si es null, acumula y devuelve el valor (solo para valores pequeños).
+     */
+    private String leerStringJson(java.io.Reader reader, java.io.Writer destino) throws java.io.IOException {
+        StringBuilder acumulado = destino == null ? new StringBuilder() : null;
+        int c;
+        while ((c = reader.read()) != -1 && c != '"') {
+            if (c == '\\') {
+                int e = reader.read();
+                switch (e) {
+                    case 'n' -> c = '\n';
+                    case 'r' -> c = '\r';
+                    case 't' -> c = '\t';
+                    case 'b' -> c = '\b';
+                    case 'f' -> c = '\f';
+                    case 'u' -> {
+                        char[] hex = new char[4];
+                        for (int i = 0; i < 4; i++) {
+                            hex[i] = (char) reader.read();
+                        }
+                        c = Integer.parseInt(new String(hex), 16);
+                    }
+                    default -> c = e; // \" \\ \/
+                }
+            }
+            if (destino != null) {
+                destino.write(c);
+            } else {
+                acumulado.append((char) c);
+            }
+        }
+        return acumulado == null ? null : acumulado.toString();
     }
 
     /**

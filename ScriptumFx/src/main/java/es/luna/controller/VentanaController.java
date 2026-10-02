@@ -177,6 +177,7 @@ public class VentanaController {
     private File archivoSubido = null; // Mantener referencia al archivo subido
     private String nombreArchivoOriginal = null; // Nombre del archivo original
     private String archivoSalidaCifrado = null; // Contenido cifrado del archivo (texto)
+    private File archivoSalidaGrande = null; // Resultado grande guardado en disco (no se carga en memoria)
     private byte[] archivoSalidaBinaria = null; // Contenido binario del archivo descifrado
     private boolean esSalidaArchivo = false; // Indica si la salida es un archivo cifrado
     private boolean esSalidaBinaria = false; // Indica si la salida contiene datos binarios
@@ -460,7 +461,7 @@ public class VentanaController {
         // Actualizar texto e icono del botón
         if (Mensajes.obtener("modo.cifrar").equals(modo)) {
             btnAccion.setText(Mensajes.obtener("boton.cifrar"));
-            FontIcon lockIcon = new FontIcon("fas-lock");
+                                FontIcon lockIcon = new FontIcon("fa-filter");
             lockIcon.setIconSize(16);
             btnAccion.setGraphic(lockIcon);
             lblResultado.setText(Mensajes.obtener("salida.resultado.cifrado"));
@@ -624,13 +625,15 @@ public class VentanaController {
 
         operacion.thenAccept(response -> Platform.runLater(() -> {
                     // Guardar contenido cifrado
-                    archivoSalidaCifrado = response.getTextoCifrado();
+                    archivoSalidaGrande = response.getArchivoSalida();
+                    archivoSalidaCifrado = archivoSalidaGrande != null ? null : response.getTextoCifrado();
+                    long longitudSalida = archivoSalidaGrande != null ? archivoSalidaGrande.length() : response.getTextoCifrado().length();
 
                     if (archivoSubido != null) {
                         // Es un archivo - mostrar mensaje informativo
                         esSalidaArchivo = true;
                         ultimaOperacionFueCifrado = true;
-                        long tamanioCifrado = archivoSalidaCifrado.length();
+                        long tamanioCifrado = longitudSalida;
                         double tamanioMB = tamanioCifrado / (1024.0 * 1024.0);
                         String mensaje = String.format(
                                 """
@@ -648,7 +651,7 @@ public class VentanaController {
                     } else {
                         // Es texto - mostrar contenido
                         esSalidaArchivo = false;
-                        txtSalida.setText(archivoSalidaCifrado);
+                        txtSalida.setText(response.getTextoCifrado());
                     }
 
                     mostrarExito(Mensajes.obtener("estado.cifrado.exitoso", response.getClaveUsada()));
@@ -679,13 +682,15 @@ public class VentanaController {
 
         operacion.thenAccept(response -> Platform.runLater(() -> {
                     // Guardar contenido descifrado
-                    archivoSalidaCifrado = response.getTextoDescifrado();
+                    archivoSalidaGrande = response.getArchivoSalida();
+                    archivoSalidaCifrado = archivoSalidaGrande != null ? null : response.getTextoDescifrado();
+                    long longitudSalida = archivoSalidaGrande != null ? archivoSalidaGrande.length() : response.getTextoDescifrado().length();
 
                     if (archivoSubido != null) {
                         // Es un archivo - mostrar mensaje informativo
                         esSalidaArchivo = true;
                         ultimaOperacionFueCifrado = false;
-                        long tamanioDescifrado = archivoSalidaCifrado.length();
+                        long tamanioDescifrado = longitudSalida;
                         double tamanioMB = tamanioDescifrado / (1024.0 * 1024.0);
                         String mensaje = String.format(
                                 """
@@ -701,7 +706,7 @@ public class VentanaController {
                     } else {
                         // Es texto - mostrar contenido
                         esSalidaArchivo = false;
-                        txtSalida.setText(archivoSalidaCifrado);
+                        txtSalida.setText(response.getTextoDescifrado());
                     }
 
                     mostrarExito(Mensajes.obtener("estado.descifrado.exitoso"));
@@ -1022,6 +1027,7 @@ public class VentanaController {
         txtSalida.clear();
         lblMensajeEstado.setText("");
         archivoSalidaCifrado = null; // Limpiar contenido cifrado
+        archivoSalidaGrande = null;
         archivoSalidaBinaria = null; // Limpiar bytes binarios
         esSalidaArchivo = false; // Resetear flag
         esSalidaBinaria = false; // Resetear flag binario
@@ -1093,9 +1099,9 @@ public class VentanaController {
 
             logger.info("Descargando archivo binario descifrado: {} -> {}", nombreArchivoOriginal, nombreArchivoSugerido);
 
-        } else if (esSalidaArchivo && archivoSalidaCifrado != null && !archivoSalidaCifrado.isEmpty()) {
-            // Tenemos datos de texto (archivo cifrado o texto normal)
-            contenidoTexto = archivoSalidaCifrado;
+        } else if (esSalidaArchivo && (archivoSalidaGrande != null || (archivoSalidaCifrado != null && !archivoSalidaCifrado.isEmpty()))) {
+            // Tenemos datos de texto (archivo cifrado o texto normal); si es grande, está en disco
+            contenidoTexto = archivoSalidaGrande != null ? "" : archivoSalidaCifrado;
 
             // Generar nombre de archivo basado en el original y la operación
             if (nombreArchivoOriginal != null && !nombreArchivoOriginal.isEmpty()) {
@@ -1133,7 +1139,7 @@ public class VentanaController {
         }
 
         // Validar que hay contenido
-        if ((contenidoTexto == null || contenidoTexto.isEmpty()) && contenidoBinario == null) {
+        if ((contenidoTexto == null || contenidoTexto.isEmpty()) && contenidoBinario == null && archivoSalidaGrande == null) {
             mostrarAlerta(
                     Mensajes.obtener("validacion.no.texto.descargar.titulo"),
                     Mensajes.obtener("validacion.no.texto.descargar.mensaje"),
@@ -1179,6 +1185,10 @@ public class VentanaController {
                     // Escribir bytes binarios directamente
                     Files.write(archivo.toPath(), contenidoBinario);
                     logger.info("Archivo binario guardado: {} ({} bytes)", archivo.getAbsolutePath(), contenidoBinario.length);
+                } else if (archivoSalidaGrande != null && esSalidaArchivo) {
+                    // Resultado grande: copiar desde disco sin cargarlo en memoria
+                    Files.copy(archivoSalidaGrande.toPath(), archivo.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    logger.info("Archivo grande guardado: {}", archivo.getAbsolutePath());
                 } else {
                     // Escribir como texto
                     Files.writeString(archivo.toPath(), contenidoTexto);

@@ -2,6 +2,8 @@ package es.luna.model;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.io.File;
+
 /**
  * Response DTO para operación de cifrado Vigenère.
  * Corresponde al schema CifradoResponse de la API.
@@ -27,6 +29,9 @@ public class VigenereCifradoResponse {
     /**
      * Constructor vacío.
      */
+    /** Archivo con el resultado cuando es demasiado grande para mantenerlo en memoria (no se serializa). */
+    private transient File archivoSalida;
+
     public VigenereCifradoResponse() {
     }
 
@@ -84,5 +89,13 @@ public class VigenereCifradoResponse {
      */
     public void setTextoOriginalLength(int textoOriginalLength) {
         this.textoOriginalLength = textoOriginalLength;
+    }
+
+    public File getArchivoSalida() {
+        return archivoSalida;
+    }
+
+    public void setArchivoSalida(File archivoSalida) {
+        this.archivoSalida = archivoSalida;
     }
 }

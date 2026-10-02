@@ -42,6 +42,9 @@ public class ApiClient {
     /** Timeout por defecto para las peticiones (30 segundos) */
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
 
+    /** Timeout extendido para archivos grandes (5 minutos) */
+    private static final Duration LARGE_FILE_TIMEOUT = Duration.ofMinutes(5);
+
     /**
      * Constructor que crea un cliente HTTP con configuración por defecto.
      *
@@ -329,10 +332,17 @@ public class ApiClient {
 
                 logger.debug("POST multipart {} - Body size: {} bytes (file: {} bytes)", endpoint, bodyBytes.length, fileBytes.length);
 
+                // Determinar timeout según el endpoint y tamaño del archivo
+                Duration timeout = DEFAULT_TIMEOUT;
+                if (endpoint.contains("/large") || fileBytes.length > 10 * 1024 * 1024) {
+                    timeout = LARGE_FILE_TIMEOUT;
+                    logger.info("Usando timeout extendido ({} minutos) para archivo grande", timeout.toMinutes());
+                }
+
                 // Construir la petición HTTP con bytes
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(baseUrl + endpoint))
-                        .timeout(DEFAULT_TIMEOUT)
+                        .timeout(timeout)
                         .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                         .header("Accept", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofByteArray(bodyBytes))
@@ -382,6 +392,259 @@ public class ApiClient {
                 throw new ApiException(mensajeError, e);
             } catch (Exception e) {
                 logger.error("Error inesperado en petición POST multipart {}: {}", endpoint, e.getMessage());
+                String mensaje = e.getMessage() != null ? e.getMessage() : "Error desconocido en la petición";
+                throw new ApiException("Error en la petición HTTP: " + mensaje, e);
+            }
+        });
+    }
+
+    /**
+     * Realiza una petición POST multipart/form-data con streaming para archivos grandes.
+     * Este método usa BodyPublishers.ofInputStream para evitar cargar el archivo completo en memoria.
+     *
+     * @param endpoint el endpoint a llamar
+     * @param file el archivo a enviar
+     * @param formData campos adicionales del formulario
+     * @param responseClass la clase del objeto response esperado
+     * @param <T> el tipo del response
+     * @return CompletableFuture con el objeto response deserializado
+     */
+    public <T> CompletableFuture<T> postMultipartStreamingAsync(
+            String endpoint,
+            File file,
+            Map<String, String> formData,
+            Class<T> responseClass
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Generar boundary único para multipart
+                String boundary = "----WebKitFormBoundary" + UUID.randomUUID().toString().replace("-", "");
+
+                // Crear archivo temporal con el multipart completo
+                java.io.File tempFile = java.io.File.createTempFile("multipart_", ".tmp");
+                tempFile.deleteOnExit();
+
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile);
+                     java.io.BufferedOutputStream bos = new java.io.BufferedOutputStream(fos)) {
+
+                    // Agregar campos del formulario
+                    if (formData != null) {
+                        for (Map.Entry<String, String> entry : formData.entrySet()) {
+                            bos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            bos.write(("Content-Disposition: form-data; name=\"" + entry.getKey() + "\"\r\n\r\n")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            bos.write((entry.getValue() + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        }
+                    }
+
+                    // Agregar archivo (header)
+                    bos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + file.getName() + "\"\r\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+                    // Copiar archivo en bloques (streaming)
+                    try (java.io.FileInputStream fis = new java.io.FileInputStream(file);
+                         java.io.BufferedInputStream bis = new java.io.BufferedInputStream(fis)) {
+                        byte[] buffer = new byte[8192]; // 8KB buffer
+                        int bytesRead;
+                        while ((bytesRead = bis.read(buffer)) != -1) {
+                            bos.write(buffer, 0, bytesRead);
+                        }
+                    }
+
+                    // Cerrar boundary
+                    bos.write("\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write(("--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+
+                long fileSize = tempFile.length();
+                logger.info("POST multipart streaming {} - Archivo temporal creado: {} bytes", endpoint, fileSize);
+
+                // Construir la petición HTTP con streaming
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + endpoint))
+                        .timeout(LARGE_FILE_TIMEOUT)
+                        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofFile(tempFile.toPath()))
+                        .build();
+
+                logger.debug("POST multipart streaming {} - Enviando request a: {}", endpoint, request.uri());
+
+                // Enviar la petición
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                logger.debug("POST multipart streaming {} - Status: {}", endpoint, response.statusCode());
+
+                // Manejar respuestas de error HTTP
+                if (response.statusCode() >= 400) {
+                    handleErrorResponse(response);
+                }
+
+                // Deserializar el response body
+                T responseObject = gson.fromJson(response.body(), responseClass);
+                logger.info("POST multipart streaming {} - Success", endpoint);
+                return responseObject;
+
+            } catch (ApiException e) {
+                throw e;
+            } catch (JsonSyntaxException e) {
+                logger.error("Error al parsear JSON en POST multipart streaming {}: {}", endpoint, e.getMessage());
+                throw new ApiException("Error al parsear la respuesta JSON: " + e.getMessage(), e);
+            } catch (IOException e) {
+                logger.error("Error de I/O en POST multipart streaming {}: {}", endpoint, e.getClass().getSimpleName());
+
+                String tipoError = e.getClass().getSimpleName();
+                String mensajeError;
+
+                if (tipoError.contains("UnknownHost") || tipoError.contains("NoRouteToHost")) {
+                    mensajeError = "No se puede conectar al servidor. Verifica tu conexión a internet.";
+                } else if (tipoError.contains("ConnectException") || tipoError.contains("SocketTimeout")) {
+                    mensajeError = "Error de conexión con el servidor. Verifica tu conexión a internet o que el servidor esté disponible.";
+                } else if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+                    mensajeError = "Error de red: " + e.getMessage();
+                } else {
+                    mensajeError = "Error de conexión. Verifica tu conexión a internet.";
+                }
+
+                throw new ApiException(mensajeError, e);
+            } catch (Exception e) {
+                logger.error("Error inesperado en petición POST multipart streaming {}: {}", endpoint, e.getMessage());
+                String mensaje = e.getMessage() != null ? e.getMessage() : "Error desconocido en la petición";
+                throw new ApiException("Error en la petición HTTP: " + mensaje, e);
+            }
+        });
+    }
+
+    /**
+     * Realiza una petición POST multipart con streaming y guarda la respuesta JSON directamente a archivo.
+     * Evita cargar respuestas grandes en memoria.
+     *
+     * @param endpoint el endpoint a llamar
+     * @param file el archivo a enviar
+     * @param formData campos adicionales del formulario
+     * @param outputFile archivo donde guardar la respuesta JSON
+     * @return CompletableFuture que se completa cuando el archivo se ha guardado
+     */
+    public CompletableFuture<File> postMultipartStreamingToFileAsync(
+            String endpoint,
+            File file,
+            Map<String, String> formData,
+            File outputFile
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Generar boundary único para multipart
+                String boundary = "----WebKitFormBoundary" + UUID.randomUUID().toString().replace("-", "");
+
+                // Crear archivo temporal con el multipart completo
+                java.io.File tempFile = java.io.File.createTempFile("multipart_", ".tmp");
+                tempFile.deleteOnExit();
+
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile);
+                     java.io.BufferedOutputStream bos = new java.io.BufferedOutputStream(fos)) {
+
+                    // Agregar campos del formulario
+                    if (formData != null) {
+                        for (Map.Entry<String, String> entry : formData.entrySet()) {
+                            bos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            bos.write(("Content-Disposition: form-data; name=\"" + entry.getKey() + "\"\r\n\r\n")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            bos.write((entry.getValue() + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        }
+                    }
+
+                    // Agregar archivo (header)
+                    bos.write(("--" + boundary + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + file.getName() + "\"\r\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write("Content-Type: application/octet-stream\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+                    // Copiar archivo en bloques (streaming)
+                    try (java.io.FileInputStream fis = new java.io.FileInputStream(file);
+                         java.io.BufferedInputStream bis = new java.io.BufferedInputStream(fis)) {
+                        byte[] buffer = new byte[8192]; // 8KB buffer
+                        int bytesRead;
+                        while ((bytesRead = bis.read(buffer)) != -1) {
+                            bos.write(buffer, 0, bytesRead);
+                        }
+                    }
+
+                    // Cerrar boundary
+                    bos.write("\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    bos.write(("--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+
+                long fileSize = tempFile.length();
+                logger.info("POST multipart streaming to file {} - Request preparado: {} bytes", endpoint, fileSize);
+
+                // Construir la petición HTTP con streaming
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + endpoint))
+                        .timeout(LARGE_FILE_TIMEOUT)
+                        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                        .header("Accept", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofFile(tempFile.toPath()))
+                        .build();
+
+                logger.info("POST multipart streaming to file {} - Enviando y guardando respuesta en: {}",
+                        endpoint, outputFile.getAbsolutePath());
+
+                // Enviar la petición y guardar respuesta directamente a archivo
+                HttpResponse<java.nio.file.Path> response = httpClient.send(
+                        request,
+                        HttpResponse.BodyHandlers.ofFile(outputFile.toPath())
+                );
+
+                logger.debug("POST multipart streaming to file {} - Status: {}", endpoint, response.statusCode());
+
+                // Manejar respuestas de error HTTP
+                if (response.statusCode() >= 400) {
+                    // Leer el archivo de error para obtener el mensaje
+                    String errorBody = Files.readString(outputFile.toPath());
+                    outputFile.delete(); // Eliminar archivo de error
+
+                    // Crear una respuesta simulada para handleErrorResponse
+                    HttpResponse<String> errorResponse = new HttpResponse<String>() {
+                        public int statusCode() { return response.statusCode(); }
+                        public String body() { return errorBody; }
+                        public HttpRequest request() { return response.request(); }
+                        public java.net.http.HttpHeaders headers() { return response.headers(); }
+                        public java.util.Optional<HttpResponse<String>> previousResponse() { return java.util.Optional.empty(); }
+                        public java.util.Optional<javax.net.ssl.SSLSession> sslSession() { return response.sslSession(); }
+                        public java.net.URI uri() { return response.uri(); }
+                        public HttpClient.Version version() { return response.version(); }
+                    };
+
+                    handleErrorResponse(errorResponse);
+                }
+
+                logger.info("POST multipart streaming to file {} - Guardado exitosamente: {} bytes",
+                        endpoint, outputFile.length());
+                return outputFile;
+
+            } catch (ApiException e) {
+                throw e;
+            } catch (IOException e) {
+                logger.error("Error de I/O en POST multipart streaming to file {}: {}", endpoint, e.getClass().getSimpleName());
+
+                String tipoError = e.getClass().getSimpleName();
+                String mensajeError;
+
+                if (tipoError.contains("UnknownHost") || tipoError.contains("NoRouteToHost")) {
+                    mensajeError = "No se puede conectar al servidor. Verifica tu conexión a internet.";
+                } else if (tipoError.contains("ConnectException") || tipoError.contains("SocketTimeout")) {
+                    mensajeError = "Error de conexión con el servidor. Verifica tu conexión a internet o que el servidor esté disponible.";
+                } else if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+                    mensajeError = "Error de red: " + e.getMessage();
+                } else {
+                    mensajeError = "Error de conexión. Verifica tu conexión a internet.";
+                }
+
+                throw new ApiException(mensajeError, e);
+            } catch (Exception e) {
+                logger.error("Error inesperado en petición POST multipart streaming to file {}: {}", endpoint, e.getMessage());
                 String mensaje = e.getMessage() != null ? e.getMessage() : "Error desconocido en la petición";
                 throw new ApiException("Error en la petición HTTP: " + mensaje, e);
             }
