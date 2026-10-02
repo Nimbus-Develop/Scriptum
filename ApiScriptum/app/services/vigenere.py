@@ -22,8 +22,90 @@ import unicodedata
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# ALFABETO EXTENDIDO (archivos grandes)
+# ============================================================================
+# Alfabeto sobre el que opera el Vigenère de archivos grandes. Cada carácter
+# se desplaza dentro de esta lista (mod N), así que ningún carácter se pierde
+# ni se sustituye por otro. Las letras A-Z van primero para que la clave
+# (solo letras) conserve sus posiciones habituales 0-25.
+ALFABETO = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    " \t\n\r\f"                              # Espacios y saltos
+    "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"     # Puntuación ASCII
+    "ÁÉÍÓÚÜÑáéíóúüñ"                         # Tildes y eñes
+    "¿¡«»ªº°©®"                              # Símbolos del español
+    "—–•…‘’“”€"                              # Puntuación tipográfica
+)
+INDICE_ALFABETO = {caracter: i for i, caracter in enumerate(ALFABETO)}
+
+# ============================================================================
 # CAPA 1: FUNCIONES PURAS DE CIFRADO/DESCIFRADO
 # ============================================================================
+
+def cifrar_bloque(texto: str, clave: str, posicion_clave: int) -> tuple[str, int]:
+    """Cifra un fragmento de texto con Vigenère sobre el alfabeto extendido.
+
+    Se usa por bloques: devuelve la posición de la clave en la que debe
+    continuar el siguiente bloque.
+
+    Args:
+        texto (str): Fragmento a cifrar.
+        clave (str): Clave ya formateada (letras en mayúsculas).
+        posicion_clave (int): Posición de la clave por la que se continúa.
+
+    Returns:
+        tuple[str, int]: Texto cifrado y nueva posición de la clave.
+
+    Raises:
+        ValueError: Si el texto o la clave tienen caracteres fuera del alfabeto.
+
+    Example:
+        >>> cifrar_bloque("Hola", "KEY", 0)
+        ('Rsje', 1)
+    """
+    resultado = []
+    for caracter in texto:
+        if caracter not in INDICE_ALFABETO:
+            raise ValueError(f"Carácter no soportado: {caracter!r} (U+{ord(caracter):04X})")
+        if clave[posicion_clave] not in INDICE_ALFABETO:
+            raise ValueError(f"Carácter no soportado en la clave: {clave[posicion_clave]!r}")
+        # Fórmula: C = (P + K) mod N
+        posicion = (INDICE_ALFABETO[caracter] + INDICE_ALFABETO[clave[posicion_clave]]) % len(ALFABETO)
+        resultado.append(ALFABETO[posicion])
+        posicion_clave = (posicion_clave + 1) % len(clave)
+    return ''.join(resultado), posicion_clave
+
+
+def descifrar_bloque(texto: str, clave: str, posicion_clave: int) -> tuple[str, int]:
+    """Descifra un fragmento de texto con Vigenère sobre el alfabeto extendido.
+
+    Operación inversa de cifrar_bloque().
+
+    Args:
+        texto (str): Fragmento cifrado.
+        clave (str): Clave ya formateada (letras en mayúsculas).
+        posicion_clave (int): Posición de la clave por la que se continúa.
+
+    Returns:
+        tuple[str, int]: Texto descifrado y nueva posición de la clave.
+
+    Raises:
+        ValueError: Si el texto o la clave tienen caracteres fuera del alfabeto.
+    """
+    resultado = []
+    for caracter in texto:
+        if caracter not in INDICE_ALFABETO:
+            raise ValueError(f"Carácter no soportado: {caracter!r} (U+{ord(caracter):04X})")
+        if clave[posicion_clave] not in INDICE_ALFABETO:
+            raise ValueError(f"Carácter no soportado en la clave: {clave[posicion_clave]!r}")
+        # Fórmula: P = (C - K) mod N
+        posicion = (INDICE_ALFABETO[caracter] - INDICE_ALFABETO[clave[posicion_clave]]) % len(ALFABETO)
+        resultado.append(ALFABETO[posicion])
+        posicion_clave = (posicion_clave + 1) % len(clave)
+    return ''.join(resultado), posicion_clave
+
 
 def cifrar_vigenere(texto: str, clave: str) -> str:
     """Cifra un texto utilizando el algoritmo de Vigenère.

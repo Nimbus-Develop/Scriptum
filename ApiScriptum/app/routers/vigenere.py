@@ -2,6 +2,7 @@
 ROUTER VIGENÈRE
 Endpoints para cifrado y descifrado con algoritmo Vigenère
 """
+import codecs
 import logging
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 
@@ -13,7 +14,9 @@ from app.schemas.vigenere import (
     ErrorResponse
 )
 from app.services.vigenere import (
+    cifrar_bloque,
     cifrar_vigenere,
+    descifrar_bloque,
     descifrar_vigenere,
     validar_y_formatear_clave
 )
@@ -416,25 +419,16 @@ async def cifrar_archivo_grande(
         if add_header:
             logger.info("Agregando magic header al inicio: %s", repr(magic_header))
             # Cifrar el magic header
-            header_cifrado_chars = []
-            for char in magic_header:
-                if char.isalpha():
-                    # Cifrar solo letras
-                    base = ord('A')
-                    char_index = ord(char.upper()) - base
-                    key_index = ord(clave_formateada[posicion_clave]) - base
-                    cifrado_index = (char_index + key_index) % 26
-                    header_cifrado_chars.append(chr(base + cifrado_index))
-                    posicion_clave = (posicion_clave + 1) % len(clave_formateada)
-                else:
-                    # Preservar caracteres no alfabéticos
-                    header_cifrado_chars.append(char)
+            header_cifrado, posicion_clave = cifrar_bloque(magic_header, clave_formateada, posicion_clave)
 
-            texto_cifrado_completo.append(''.join(header_cifrado_chars))
+            texto_cifrado_completo.append(header_cifrado)
             bytes_procesados += len(magic_header.encode('utf-8'))
 
         # 6. Procesar el archivo por bloques
         logger.info("Iniciando cifrado en streaming por bloques...")
+
+        # Crear decodificador incremental para manejar caracteres multibyte entre bloques
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='strict')
 
         bloque_numero = 0
         while True:
@@ -442,15 +436,20 @@ async def cifrar_archivo_grande(
             bloque_bytes = await file.read(BLOCK_SIZE)
 
             if not bloque_bytes:
-                # Fin del archivo
+                # Fin del archivo - decodificar cualquier byte restante
+                bloque_texto = decoder.decode(b'', final=True)
+                if bloque_texto:
+                    # Procesar último fragmento si existe
+                    bloque_cifrado, posicion_clave = cifrar_bloque(bloque_texto, clave_formateada, posicion_clave)
+                    texto_cifrado_completo.append(bloque_cifrado)
                 break
 
             bytes_procesados += len(bloque_bytes)
             bloque_numero += 1
 
-            # Validar que sea UTF-8 válido
+            # Decodificar con decodificador incremental (maneja bytes incompletos)
             try:
-                bloque_texto = bloque_bytes.decode('utf-8')
+                bloque_texto = decoder.decode(bloque_bytes, final=False)
             except UnicodeDecodeError as exc:
                 logger.exception("Error al decodificar bloque %d como UTF-8", bloque_numero)
                 raise HTTPException(
@@ -471,22 +470,10 @@ async def cifrar_archivo_grande(
                     }
                 )
 
-            # Cifrar bloque manteniendo posición de clave y PRESERVANDO caracteres no alfabéticos
-            texto_cifrado_bloque = []
-            for char in bloque_texto:
-                if char.isalpha():
-                    # Cifrar letras
-                    base = ord('A')
-                    char_index = ord(char.upper()) - base
-                    key_index = ord(clave_formateada[posicion_clave]) - base
-                    cifrado_index = (char_index + key_index) % 26
-                    texto_cifrado_bloque.append(chr(base + cifrado_index))
-                    posicion_clave = (posicion_clave + 1) % len(clave_formateada)
-                else:
-                    # Preservar caracteres no alfabéticos (espacios, \n, etc.)
-                    texto_cifrado_bloque.append(char)
+            # Cifrar bloque manteniendo la posición de la clave (alfabeto extendido)
+            bloque_cifrado, posicion_clave = cifrar_bloque(bloque_texto, clave_formateada, posicion_clave)
 
-            texto_cifrado_completo.append(''.join(texto_cifrado_bloque))
+            texto_cifrado_completo.append(bloque_cifrado)
 
             # Log de progreso cada 10 bloques (cada 10 MB)
             if bloque_numero % 10 == 0:
@@ -684,6 +671,10 @@ async def descifrar_archivo_grande(
         canary_descifrado = ""  # Inicializar para type safety
         posicion_clave = 0
 
+        # Decodificador incremental único (canary + bloques): un carácter multibyte
+        # partido entre dos lecturas se completa con los bytes de la siguiente
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='strict')
+
         if not skip_canary:
             logger.info("Realizando canary check...")
             # Leer solo el canary (1 KB)
@@ -696,7 +687,7 @@ async def descifrar_archivo_grande(
                 )
 
             try:
-                canary_text = canary_bytes.decode('utf-8')
+                canary_text = decoder.decode(canary_bytes, final=False)
             except UnicodeDecodeError as exc:
                 logger.exception("Error al decodificar canary como UTF-8")
                 raise HTTPException(
@@ -707,22 +698,9 @@ async def descifrar_archivo_grande(
                     }
                 ) from exc
 
-            # Descifrar el canary PRESERVANDO caracteres no alfabéticos (como \n)
-            canary_descifrado_chars = []
-            for char in canary_text:
-                if char.isalpha():
-                    # Descifrar solo letras
-                    base = ord('A')
-                    char_index = ord(char.upper()) - base
-                    key_index = ord(clave_formateada[posicion_clave]) - base
-                    descifrado_index = (char_index - key_index) % 26
-                    canary_descifrado_chars.append(chr(base + descifrado_index))
-                    posicion_clave = (posicion_clave + 1) % len(clave_formateada)
-                else:
-                    # Preservar caracteres no alfabéticos (espacios, \n, etc.)
-                    canary_descifrado_chars.append(char)
+            # Descifrar el canary (alfabeto extendido)
+            canary_descifrado, posicion_clave = descifrar_bloque(canary_text, clave_formateada, posicion_clave)
 
-            canary_descifrado = ''.join(canary_descifrado_chars)
 
             # Verificar magic header (normalizar line endings para compatibilidad Windows/Unix)
             # Normalizar ambos a \n para comparación
@@ -766,15 +744,20 @@ async def descifrar_archivo_grande(
             bloque_bytes = await file.read(BLOCK_SIZE)
 
             if not bloque_bytes:
-                # Fin del archivo
+                # Fin del archivo - decodificar cualquier byte restante
+                bloque_texto = decoder.decode(b'', final=True)
+                if bloque_texto:
+                    # Procesar último fragmento si existe
+                    bloque_descifrado, posicion_clave = descifrar_bloque(bloque_texto, clave_formateada, posicion_clave)
+                    texto_descifrado_completo.append(bloque_descifrado)
                 break
 
             bytes_procesados += len(bloque_bytes)
             bloque_numero += 1
 
-            # Validar que sea UTF-8 válido
+            # Decodificar con decodificador incremental (maneja bytes incompletos)
             try:
-                bloque_texto = bloque_bytes.decode('utf-8')
+                bloque_texto = decoder.decode(bloque_bytes, final=False)
             except UnicodeDecodeError as exc:
                 logger.exception("Error al decodificar bloque %d como UTF-8", bloque_numero)
                 raise HTTPException(
@@ -795,22 +778,10 @@ async def descifrar_archivo_grande(
                     }
                 )
 
-            # Descifrar bloque manteniendo posición de clave y PRESERVANDO caracteres no alfabéticos
-            texto_descifrado_bloque = []
-            for char in bloque_texto:
-                if char.isalpha():
-                    # Descifrar letras
-                    base = ord('A')
-                    char_index = ord(char.upper()) - base
-                    key_index = ord(clave_formateada[posicion_clave]) - base
-                    descifrado_index = (char_index - key_index) % 26
-                    texto_descifrado_bloque.append(chr(base + descifrado_index))
-                    posicion_clave = (posicion_clave + 1) % len(clave_formateada)
-                else:
-                    # Preservar caracteres no alfabéticos (espacios, \n, etc.)
-                    texto_descifrado_bloque.append(char)
+            # Descifrar bloque manteniendo la posición de la clave (alfabeto extendido)
+            bloque_descifrado, posicion_clave = descifrar_bloque(bloque_texto, clave_formateada, posicion_clave)
 
-            texto_descifrado_completo.append(''.join(texto_descifrado_bloque))
+            texto_descifrado_completo.append(bloque_descifrado)
 
             # Log de progreso cada 10 bloques (cada 10 MB)
             if bloque_numero % 10 == 0:
