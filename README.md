@@ -34,7 +34,7 @@ Scriptum permite cifrar y descifrar:
 
 Utilizando algoritmos de cifrado robustos:
 - 🔒 **AES** (Advanced Encryption Standard) - 128, 192 y 256 bits
-- 📝 **Vigenère** - Cifrado clásico mejorado (elimina espacios por seguridad)
+- 📝 **Vigenère** - Cifrado clásico mejorado (texto y archivos pequeños: elimina espacios por seguridad; archivos grandes ≥ 9,5 MB: alfabeto extendido, reversible y sin pérdida de caracteres)
 
 ---
 
@@ -277,17 +277,6 @@ pytest tests/ --cov=app --cov-report=html
 - **Maven** - Gestión de dependencias
 - **Logback** - Sistema de logging
 - **FXML + CSS** - Diseño de interfaces
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Soporte para más algoritmos de cifrado (ChaCha20, RSA)
-- [ ] Autenticación y gestión de usuarios
-- [ ] Almacenamiento seguro en la nube
-- [ ] Aplicación móvil (Android/iOS)
-- [ ] Extensión para navegadores
-- [ ] Cifrado de comunicaciones en tiempo real
 
 
 ## 👤 Autores
